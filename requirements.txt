@@ -1,0 +1,50 @@
+# ============================================================
+# requirements.txt — Python Dependencies
+# ============================================================
+# Versions are pinned (==) for reproducibility.
+# "It works on my Colab" stops being an excuse when versions are pinned.
+# Update versions deliberately, not accidentally.
+#
+# Install in Colab with:
+#   !pip install -r requirements.txt
+# ============================================================
+
+# ── Web Framework ─────────────────────────────────────────
+fastapi==0.115.5          # The async web framework replacing Flask
+uvicorn[standard]==0.32.1 # ASGI server that runs FastAPI (like gunicorn for Flask)
+python-multipart==0.0.17  # Required for FastAPI to handle file uploads (form-data)
+
+# ── Configuration & Validation ───────────────────────────
+pydantic==2.10.3              # Data validation (FastAPI depends on this)
+pydantic-settings==2.6.1      # Reads .env files into Settings class
+python-dotenv==1.0.1          # .env file loader
+
+# ── Google Gemini ─────────────────────────────────────────
+google-generativeai==0.8.3    # Official Google SDK for Gemini API
+                               # Replaces: langchain + huggingface_hub + transformers
+
+# ── ML & Computer Vision ─────────────────────────────────
+torch==2.5.1                  # PyTorch — already in Colab, pinned for local dev
+torchvision==0.20.1            # EfficientNet and image transforms
+Pillow==11.0.0                 # Image loading and preprocessing
+numpy==1.26.4                  # Array operations (numpy 2.x has breaking changes, use 1.x)
+opencv-python-headless==4.10.0.84  # OpenCV WITHOUT GUI — critical for server use
+                                    # Original used opencv-python which tries to open windows
+                                    # -headless version works in Colab/servers
+
+# ── scikit-learn (for age scaler) ────────────────────────
+scikit-learn==1.5.2            # Only used to load the age_scaler.pkl
+joblib==1.4.2                  # scikit-learn's serialization dependency
+
+# ── Shopping API ─────────────────────────────────────────
+google-search-results==2.4.2   # SerpApi client — Google Shopping search
+                                # Free tier: 100 searches/month
+                                # Replaces fragile web scraping
+
+# ── HTTP Client ──────────────────────────────────────────
+httpx==0.28.1                  # Async HTTP client for any external API calls
+                                # aiohttp alternative, cleaner API
+
+# ── Utilities ────────────────────────────────────────────
+python-jose==3.3.0             # JWT tokens (for future auth feature)
+aiofiles==24.1.0               # Async file I/O — reading/writing files without blocking
