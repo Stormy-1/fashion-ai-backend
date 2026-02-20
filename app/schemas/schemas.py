@@ -90,7 +90,8 @@ class OutfitRecommendation(BaseModel):
     color_palette: List[str]           # ["Cream", "Gold", "Maroon"]
     fit:           str                 # "Regular Fit - M"
     gender:        str
-    style_notes:   Optional[str] = None  # Extra context Gemini might add
+    style_notes:   Optional[str] = None
+    search_query:  Optional[str] = None  # Used by shopping_service to find products
 
 
 class ShoppingProduct(BaseModel):
@@ -102,7 +103,8 @@ class ShoppingProduct(BaseModel):
     reviews:     Optional[int] = None
     image_url:   Optional[str] = None
     product_url: Optional[str] = None
-    source:      Optional[str] = None   # Which platform (e.g. "Amazon", "Flipkart")
+    source:      Optional[str] = None
+    outfit_index: Optional[int] = None  # Which outfit (0/1/2) this product belongs to
 
 
 class RecommendationResponse(BaseModel):
