@@ -23,6 +23,18 @@ from PIL import Image
 from torchvision import transforms
 from typing import Tuple
 
+# run_in_threadpool is Starlette's utility for offloading blocking (synchronous)
+# code to a worker thread WITHOUT blocking the FastAPI event loop.
+#
+# The pattern we use throughout this file:
+#   _sync_*  → plain `def`, contains all the blocking PyTorch logic
+#   async *  → `async def` wrapper that calls run_in_threadpool(_sync_*)
+#
+# This way asyncio.gather() in recommend.py genuinely runs both models
+# concurrently in separate threads, while the event loop stays free
+# to handle other incoming requests (e.g. /health from another user).
+from starlette.concurrency import run_in_threadpool
+
 from app.services.model_service import model_store
 
 logger = logging.getLogger(__name__)
@@ -188,18 +200,11 @@ def features_to_human_readable(processed_probs: dict[str, float]) -> str:
     return ", ".join(detected)
 
 
-async def run_age_gender_prediction(image_bytes: bytes) -> Tuple[int, str, float]:
+def _sync_age_gender_prediction(image_bytes: bytes) -> Tuple[int, str, float]:
     """
-    Runs the age/gender model on an image.
-
-    Returns:
-        Tuple of (age: int, gender: str, gender_confidence: float)
-        e.g. (27, "Male", 0.94)
-
-    Note: This is async because in Phase 2 we'll run age/gender and
-    facial features concurrently with asyncio.gather(). Even though
-    the model inference itself is synchronous (PyTorch), wrapping in
-    async lets us compose it with other async operations cleanly.
+    SYNCHRONOUS core — all blocking PyTorch logic lives here.
+    Plain `def` (not async) so it's safe to run in a thread pool.
+    Never call this directly from async code — use the wrapper below.
     """
     model = model_store.get("age_gender")
     scaler = model_store.get("age_scaler")
@@ -212,30 +217,23 @@ async def run_age_gender_prediction(image_bytes: bytes) -> Tuple[int, str, float
         tensor = _bytes_to_tensor(image_bytes)
 
         with torch.no_grad():
-            # Use automatic mixed precision on GPU — faster inference
-            # with negligible accuracy loss on float16
             if model_store["device"].type == "cuda":
                 with torch.amp.autocast("cuda"):
                     output = model(tensor)
             else:
                 output = model(tensor)
 
-        # output shape: [1, 2] → [age_raw, gender_logit]
-        output = output.squeeze(0).cpu().numpy()  # Remove batch dim → [2]
+        output     = output.squeeze(0).cpu().numpy()
         age_raw    = float(output[0])
         gender_raw = float(output[1])
 
-        # Reverse the age normalization using the saved scaler
-        # Without this, age would be a small normalized float, not actual years
         if scaler is not None:
             age = int(round(scaler.inverse_transform([[age_raw]])[0][0]))
-            age = max(1, min(age, 100))  # Clamp to realistic range
+            age = max(1, min(age, 100))
         else:
-            # Fallback: assume age was normalized to [0,1] during training
             age = int(round(age_raw * 100))
             age = max(1, min(age, 100))
 
-        # Gender: sigmoid converts logit to probability, threshold at 0.5
         gender_prob = float(torch.sigmoid(torch.tensor(gender_raw)))
         gender      = "Male" if gender_prob >= 0.5 else "Female"
         confidence  = gender_prob if gender == "Male" else 1 - gender_prob
@@ -248,15 +246,26 @@ async def run_age_gender_prediction(image_bytes: bytes) -> Tuple[int, str, float
         return 25, "Unknown", 0.0
 
 
-async def run_facial_feature_prediction(image_bytes: bytes) -> Tuple[dict, str]:
+async def run_age_gender_prediction(image_bytes: bytes) -> Tuple[int, str, float]:
     """
-    Runs the facial feature classifier on an image.
+    ASYNC wrapper — the function your router actually calls.
 
-    Returns:
-        Tuple of:
-        - processed_probs: dict of {attr: probability} after thresholding
-        - readable_summary: natural language string for the LLM
-        e.g. ({"Black_Hair": 0.91, ...}, "black hair, oval face, arched eyebrows")
+    Offloads _sync_age_gender_prediction to a worker thread via
+    run_in_threadpool. This frees the event loop immediately so
+    FastAPI can handle other requests while PyTorch is running.
+
+    When asyncio.gather() calls this alongside run_facial_feature_prediction,
+    both thread-pool jobs execute concurrently — genuine parallelism,
+    not the fake async that a bare `async def` with blocking code gives you.
+    """
+    return await run_in_threadpool(_sync_age_gender_prediction, image_bytes)
+
+
+def _sync_facial_feature_prediction(image_bytes: bytes) -> Tuple[dict, str]:
+    """
+    SYNCHRONOUS core — all blocking PyTorch logic lives here.
+    Plain `def` (not async) so it's safe to run in a thread pool.
+    Never call this directly from async code — use the wrapper below.
     """
     model = model_store.get("facial_features")
 
@@ -274,23 +283,27 @@ async def run_facial_feature_prediction(image_bytes: bytes) -> Tuple[dict, str]:
             else:
                 output = model(tensor)
 
-        # output shape: [1, 16] — one logit per attribute
-        # sigmoid converts logits to probabilities in [0, 1]
-        # Each attribute is independent (multi-label, not multi-class)
-        probs = torch.sigmoid(output).squeeze(0).cpu().numpy()
+        probs      = torch.sigmoid(output).squeeze(0).cpu().numpy()
+        raw_probs  = {attr: float(probs[i]) for i, attr in enumerate(CELEBA_ATTRS)}
+        processed  = _apply_categorical_thresholding(raw_probs)
+        readable   = features_to_human_readable(processed)
 
-        # Map attribute names to their probability scores
-        raw_probs = {attr: float(probs[i]) for i, attr in enumerate(CELEBA_ATTRS)}
-
-        # Apply categorical thresholding (the smart logic from original ml.py)
-        processed_probs = _apply_categorical_thresholding(raw_probs)
-
-        # Convert to human-readable for LLM
-        readable = features_to_human_readable(processed_probs)
-
-        logger.info(f"Facial features detected: {readable}")
-        return processed_probs, readable
+        logger.info(f"Facial features: {readable}")
+        return processed, readable
 
     except Exception as e:
         logger.error(f"Facial feature inference failed: {e}")
         return {}, "facial feature detection failed"
+
+
+async def run_facial_feature_prediction(image_bytes: bytes) -> Tuple[dict, str]:
+    """
+    ASYNC wrapper — the function your router actually calls.
+
+    Same pattern as run_age_gender_prediction: offloads the blocking
+    _sync_facial_feature_prediction to a worker thread.
+
+    When asyncio.gather() runs this alongside run_age_gender_prediction,
+    both execute concurrently in separate threads — true parallelism.
+    """
+    return await run_in_threadpool(_sync_facial_feature_prediction, image_bytes)
